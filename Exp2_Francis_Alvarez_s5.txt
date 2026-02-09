@@ -1,0 +1,224 @@
+-- =============================================================================
+--DESARROLLO SUMATIVA EXP2 
+--==============================================================================
+show user; 
+
+SET SERVEROUTPUT ON; --salida de script
+
+-- TRUNCADO TABLA ERRORES__________________________________________________
+DROP TABLE error_log CASCADE CONSTRAINTS;
+CREATE TABLE ERROR_LOG (
+id_error NUMBER primary key, 
+error_code NUMBER, 
+error_msg VARCHAR2(500)
+); 
+-- drop sequence 
+DROP SEQUENCE seq_err;
+CREATE SEQUENCE seq_err
+START WITH 1
+INCREMENT BY 1 
+NOCACHE;
+END;
+/
+
+-- DECLARACION DE VARIABLES_____________________________________________________
+DECLARE
+--VAR b_periodo_detalle NUMBER; 
+--EXEC :b_periodo_detalle := 2025; -- PERIODO A CONSIDERAR 
+-- variable para commit 
+v_total_registros NUMBER; 
+v_contador NUMBER;
+
+-- VARIABLES PARA CALCULOS______________________________________________________ 
+v_porcentaje NUMBER; 
+v_aporte NUMBER; 
+
+-- VARIABLES PARA RECOGER ERRORES ______________________________________________
+    v_exe_code NUMBER;
+    v_exe_msg VARCHAR2(500); 
+
+-- EXCEPCION PERSONALIZADA______________________________________________________
+
+e_monto_invalido EXCEPTION; 
+
+--VARRAY PARA TIPO_TRANSACCION_TARJETA__________________________________________
+TYPE tp_varray_tipo_transaccion IS VARRAY (3)
+OF tipo_transaccion_tarjeta.nombre_tptran_tarjeta%TYPE; 
+
+var_tipo_transaccion tp_varray_tipo_transaccion; 
+
+
+-- CURSOR DETALLE_______________________________________________________________
+CURSOR cr_detalle IS
+	SELECT
+    c.numrun, 
+    c.dvrun, 
+    tc.nro_tarjeta, 
+    ttc.nro_transaccion, 
+    ttc.fecha_transaccion, 
+    ttt.nombre_tptran_tarjeta,
+    ttc.monto_total_transaccion
+
+FROM cliente c 
+JOIN tarjeta_cliente tc 
+    ON c.numrun = tc.numrun
+JOIN transaccion_tarjeta_cliente ttc
+    ON tc.nro_tarjeta = ttc.nro_tarjeta 
+JOIN tipo_transaccion_tarjeta ttt
+    ON ttc.cod_tptran_tarjeta = ttt.cod_tptran_tarjeta
+WHERE TO_NUMBER(EXTRACT(YEAR FROM ttc.fecha_transaccion)) = 2025
+ORDER BY ttc.fecha_transaccion ASC, c.numrun ASC; 
+    
+
+    
+-- CURSOR RESUMEN_______________________________________________________________
+
+CURSOR cr_resumen (p_mes NUMBER) IS 
+SELECT 
+TO_CHAR(fecha_transaccion, 'MMYYYY') AS "fecha", 
+tipo_transaccion, 
+SUM(monto_transaccion) AS "monto_total", 
+SUM(aporte_sbif) AS "aporte_total" 
+FROM 
+detalle_aporte_sbif
+WHERE EXTRACT(MONTH FROM fecha_transaccion) = p_mes
+GROUP BY TO_CHAR(fecha_transaccion, 'MMYYYY'), tipo_transaccion
+ORDER BY tipo_transaccion ASC;
+
+-- REGISTRO_detalle_____________________________________________________________
+TYPE t_trans_detalle IS RECORD(
+    numrun cliente.numrun%TYPE,
+    dvrun cliente.dvrun%TYPE,  
+    nro_tarjeta tarjeta_cliente.nro_tarjeta%TYPE, 
+    nro_transaccion transaccion_tarjeta_cliente.nro_transaccion%TYPE,
+    fecha_transaccion transaccion_tarjeta_cliente.fecha_transaccion%TYPE,
+    nombre_tptran_tarjeta tipo_transaccion_tarjeta.nombre_tptran_tarjeta%TYPE,
+    monto_total_transaccion transaccion_tarjeta_cliente.monto_total_transaccion%TYPE
+    ); 
+    
+    reg_detalle t_trans_detalle;
+
+--___________________BLOQUE ANONIMO______________________________________________________
+BEGIN 
+v_contador := 0; 
+
+BEGIN 
+    SELECT COUNT(*) 
+    INTO v_total_registros
+    FROM transaccion_tarjeta_cliente
+    WHERE EXTRACT(YEAR FROM fecha_transaccion) = 2025;
+    END; 
+    
+SAVEPOINT transacciones;
+
+--TRUNCADO TABLA DETALLE_APORTE_SBIF____________________________________________
+EXECUTE IMMEDIATE 'TRUNCATE TABLE detalle_aporte_sbif'; 
+-- TRUNCADO TABLA RESUMEN_APORTE_ABIF______________________________________
+EXECUTE IMMEDIATE 'TRUNCATE TABLE resumen_aporte_sbif';
+
+
+--LLENADO VARRAY________________________________________________________________
+var_tipo_transaccion := tp_varray_tipo_transaccion('Súper Avance en Efectivo', 
+'Compras Tiendas Retail o Asociadas', 'Avance en Efectivo'); 
+
+--LOOP1: detalle_aporte_________________________________________________________
+
+OPEN cr_detalle;
+LOOP
+FETCH cr_detalle INTO reg_detalle;
+EXIT WHEN cr_detalle%NOTFOUND;
+
+v_porcentaje:=0; 
+    -- excepcion
+    
+    
+    
+    IF reg_detalle.monto_total_transaccion < 0 THEN
+     RAISE e_monto_invalido;
+    END IF;
+    --busqueda tramo
+    SELECT porc_aporte_sbif
+    INTO v_porcentaje
+    FROM tramo_aporte_sbif
+    WHERE reg_detalle.monto_total_transaccion BETWEEN tramo_inf_av_sav AND tramo_sup_av_sav; 
+    
+    -- CALCULAR APORTE _____________________________________________________________
+
+    v_aporte := ROUND(reg_detalle.monto_total_transaccion * (v_porcentaje/100)); 
+    
+-- INSERTAR A LA TABLA DETALLE_APORTE_SBIF______________________________________
+    INSERT INTO detalle_aporte_sbif(
+    numrun, 
+    dvrun, 
+    nro_tarjeta,
+    nro_transaccion,
+    fecha_transaccion,
+    tipo_transaccion, 
+    monto_transaccion, 
+    aporte_sbif)
+        VALUES( 
+        reg_detalle.numrun, 
+        reg_detalle.dvrun,
+        reg_detalle.nro_tarjeta,
+        reg_detalle.nro_transaccion,
+        reg_detalle.fecha_transaccion,
+        reg_detalle.nombre_tptran_tarjeta,
+        reg_detalle.monto_total_transaccion,
+        v_aporte); 
+        
+        v_contador := v_contador +1; 
+    --EXCEPCIONES______________________________________________________________    
+    
+
+    EXCEPTION 
+    WHEN e_monto_invalido THEN 
+    INSERT INTO error_log VALUES(seq_err.NEXTVAL, -20002, 
+    'Monto negativo detectado en transacción ' || reg_detalle.nro_transaccion || ': $' || reg_detalle.monto_total_transaccion);
+    
+    WHEN NO_DATA_FOUND THEN
+    v_porcentaje:=0; 
+    INSERT INTO detalle_aporte_sbif(numrun, dvrun, nro_tarjeta, nro_transaccion, 
+                    fecha_transaccion, tipo_transaccion, monto_transaccion, aporte_sbif)
+    VALUES(reg_detalle.numrun, reg_detalle.dvrun, reg_detalle.nro_tarjeta, 
+                    reg_detalle.nro_transaccion, reg_detalle.fecha_transaccion, 
+                    reg_detalle.nombre_tptran_tarjeta, reg_detalle.monto_total_transaccion, v_aporte);
+    
+    WHEN OTHERS THEN 
+    v_exe_code:= SQLCODE;
+    v_exe_msg:= SQLERRM; 
+    INSERT INTO error_log VALUES(seq_err.NEXTVAL, v_exe_code, v_exe_msg); 
+    
+    END; 
+
+END LOOP; 
+CLOSE cr_detalle; 
+
+--LOOP2 RESUMEN_APORTE_SBIF ____________________________________________________
+
+FOR v_mes IN 1..12 LOOP
+
+    FOR reg_trans_resumen IN cr_resumen(v_mes) LOOP
+    
+    INSERT INTO resumen_aporte_sbif(
+    mes_anno, 
+    tipo_transaccion, 
+    monto_total_transacciones,
+    aporte_total_sbif)
+        VALUES (reg_trans_resumen.fecha,
+        reg_trans_resumen.tipo_transaccion, 
+        reg_trans_resumen.monto_total,
+        reg_trans_resumen.aporte_total
+        );
+    END LOOP; 
+END LOOP; 
+
+-- CONDICION PARA COMMIT O ROLLBACK 
+IF v_total_registros = v_contador THEN
+        COMMIT;
+    ELSE
+        ROLLBACK TO transacciones;
+    END IF;
+
+
+END;
+/
