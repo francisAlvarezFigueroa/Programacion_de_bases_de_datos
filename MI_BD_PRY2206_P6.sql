@@ -2323,12 +2323,18 @@ COMMIT;
 
 
 
+
 -- //////////////////////////////////////////////////////////////////////////////
 --DESARROLLO 
 --//////////////////////////////////////////////////////////////////////////////
 
 
 --PROCEDIMIENTO ALMACENADO PRINCIPAL, PL/SQL ya almacenado 
+
+create or replace PROCEDURE sp_pago_cero(p_fecha_periodo DATE, p_uf NUMBER)
+IS 
+
+CURSOR cr_deptos_pago_cero IS
 
 SELECT
 gc.anno_mes_pcgc,
@@ -2355,7 +2361,59 @@ ON e.numrun_adm = a.numrun_adm
 INNER JOIN responsable_pago_gasto_comun rpgc
 ON gc.numrun_rpgc = rpgc.numrun_rpgc
 WHERE pgc.anno_mes_pcgc IS NULL 
-AND gc.anno_mes_pcgc = TO_NUMBER(TO_CHAR(date '2026-04-30', 'YYYYMM'));
+AND gc.anno_mes_pcgc = TO_NUMBER(TO_CHAR(p_fecha_periodo, 'YYYYMM'));
+
+v_fecha_pago DATE;
+v_fecha_hasta DATE; 
+v_observacion VARCHAR2(500); 
+v_valor_multa NUMBER; 
+v_codigo_error NUMBER; 
+v_mensaje_error VARCHAR2(500);
+
+BEGIN 
+
+FOR reg_deptos IN cr_deptos_pago_cero LOOP
+
+v_fecha_pago := reg_deptos.fecha_pago_gc; 
+v_fecha_hasta := reg_deptos.fecha_hasta_gc; 
+
+IF TRUNC(MONTHS_BETWEEN(v_fecha_pago, v_fecha_hasta)) =1 THEN 
+v_observacion := 'Se realizará el corte de combustible y agua';
+v_valor_multa := p_uf *2;
+
+ELSIF TRUNC(MONTHS_BETWEEN(v_fecha_pago, v_fecha_hasta)) >2 THEN
+v_observacion := 'Se realizara el corte de combustible y agua a contar del ' || ADD_MONTHS(v_fecha_hasta,2); --dandole 2 mes de atraso
+v_valor_multa := p_uf *4;
+END IF; 
+-- profe me di cuenta tarde que aqui hay un error de logica si es que no tiene fecha de pago entinces tira un null y por ende no entra a ninguna condicion y no se inserta en la tabla T.T
+
+    BEGIN   
+    INSERT INTO gasto_comun_pago_cero VALUES (
+    reg_deptos.anno_mes_pcgc,
+    reg_deptos.id_edif, 
+    reg_deptos.nombre_edif, 
+    reg_deptos.numrun_adm || '-' ||reg_deptos.dvrun_adm, 
+    reg_deptos.nombre_adm, 
+    reg_deptos.nro_depto,
+    reg_deptos.numrun_rpgc || '-'|| reg_deptos.dvrun_rpgc,
+    reg_deptos.nombre_rpgc,
+    v_valor_multa, 
+    v_observacion
+    );
+
+    EXCEPTION
+    WHEN DUP_VAL_ON_INDEX THEN 
+    DBMS_OUTPUT.PUT_LINE('valor repetido');
+    WHEN OTHERS THEN
+    v_codigo_error := SQLCODE; 
+    v_mensaje_error := SQLERRM; 
+    DBMS_OUTPUT.PUT_LINE ('errror: ' || v_codigo_error || ' ' || v_mensaje_error); 
+    END;
+
+    END LOOP; 
+    COMMIT;
+    
+    END sp_pago_cero;
 
 
     --EJECUTAR PROCEDURE 
@@ -2363,3 +2421,4 @@ AND gc.anno_mes_pcgc = TO_NUMBER(TO_CHAR(date '2026-04-30', 'YYYYMM'));
     
     
 ----
+
